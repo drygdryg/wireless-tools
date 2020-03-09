@@ -13,6 +13,7 @@
 
 #include "iwlib.h"		/* Header */
 #include <sys/time.h>
+#include <stdbool.h>
 
 /****************************** TYPES ******************************/
 
@@ -212,6 +213,247 @@ iw_print_value_name(unsigned int		value,
 
 /*------------------------------------------------------------------*/
 /*
+ * Parse, and display the results of a Wi-Fi Protected Setup (WPS).
+ *
+ */
+static const char * wifi_wps_dev_passwd_id(uint16_t id)
+{
+  switch (id) {
+  case 0:
+    return "Default (PIN)";
+  case 1:
+    return "User-specified";
+  case 2:
+    return "Machine-specified";
+  case 3:
+    return "Rekey";
+  case 4:
+    return "PushButton";
+  case 5:
+    return "Registrar-specified";
+  default:
+    return "??";
+  }
+}
+
+static inline void 
+iw_print_wps(unsigned char * data, int len) {
+    bool first = true;
+  __u16 subtype, sublen;
+
+  while (len >= 4) {
+        subtype = (data[0] << 8) + data[1];
+        sublen = (data[2] << 8) + data[3];
+        if (sublen > len - 4)
+            break;
+
+        switch (subtype) {
+        case 0x104a:
+            if (sublen < 1) {
+                printf("                        Version: (invalid "
+                       "length %d)\n", sublen);
+                break;
+            }
+            printf("                        Version: %d.%d\n", data[4] >> 4, data[4] & 0xF);
+            break;
+        case 0x1011:
+            printf("                        Device name: %.*s\n", sublen, data + 4);
+            break;
+        case 0x1012: {
+            uint16_t id;
+            if (sublen != 2) {
+                printf("                        Device Password ID: (invalid length %d)\n",
+                       sublen);
+                break;
+            }
+            id = data[4] << 8 | data[5];
+            printf("                        Device Password ID: %u (%s)\n", id, wifi_wps_dev_passwd_id(id));
+            break;
+        }
+        case 0x1021:
+            printf("                        Manufacturer: %.*s\n", sublen, data + 4);
+            break;
+        case 0x1023:
+            printf("                        Model: %.*s\n", sublen, data + 4);
+            break;
+        case 0x1024:
+            printf("                        Model Number: %.*s\n", sublen, data + 4);
+            break;
+        case 0x103b: {
+            __u8 val;
+
+            if (sublen < 1) {
+                printf("                        Response Type: (invalid length %d)\n",
+                       sublen);
+                break;
+            }
+            val = data[4];
+            printf("                        Response Type: %d%s\n",
+                   val, val == 3 ? " (AP)" : "");
+            break;
+        }
+        case 0x103c: {
+            __u8 val;
+
+            if (sublen < 1) {
+                printf("                        RF Bands: (invalid length %d)\n",
+                       sublen);
+                break;
+            }
+            val = data[4];
+            printf("                        RF Bands: 0x%x\n", val);
+            break;
+        }
+        case 0x1041: {
+            __u8 val;
+
+            if (sublen < 1) {
+                printf("                        Selected Registrar: (invalid length %d)\n",
+                       sublen);
+                break;
+            }
+            val = data[4];
+
+            printf("                        Selected Registrar: 0x%x\n", val);
+            break;
+        }
+        case 0x1042:
+            printf("                        Serial Number: %.*s\n", sublen, data + 4);
+            break;
+        case 0x1044: {
+            __u8 val;
+
+            if (sublen < 1) {
+                printf("                        Wi-Fi Protected Setup State: (invalid length %d)\n",
+                       sublen);
+                break;
+            }
+            val = data[4];
+            printf("                        Wi-Fi Protected Setup State: %d%s%s\n",
+                   val,
+                   val == 1 ? " (Unconfigured)" : "",
+                   val == 2 ? " (Configured)" : "");
+            break;
+        }
+        case 0x1047:
+            printf("                        UUID: ");
+            if (sublen != 16) {
+                printf("(invalid, length=%d)\n", sublen);
+                break;
+            }
+            printf("%02x%02x%02x%02x-%02x%02x-%02x%02x-"
+                "%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                data[4], data[5], data[6], data[7],
+                data[8], data[9], data[10], data[11],
+                data[12], data[13], data[14], data[15],
+                data[16], data[17], data[18], data[19]);
+            break;
+        case 0x1049:
+            if (sublen == 6 &&
+                data[4] == 0x00 &&
+                data[5] == 0x37 &&
+                data[6] == 0x2a &&
+                data[7] == 0x00 &&
+                data[8] == 0x01) {
+                uint8_t v2 = data[9];
+                printf("                        Version2: %d.%d\n", v2 >> 4, v2 & 0xf);
+            } else {
+                printf("                        Unknown vendor extension. len=%u\n",
+                       sublen);
+            }
+            break;
+        case 0x1054: {
+            if (sublen != 8) {
+                printf("                        Primary Device Type: (invalid length %d)\n",
+                       sublen);
+                break;
+            }
+            printf("                        Primary Device Type: "
+                   "%u-%02x%02x%02x%02x-%u\n",
+                   data[4] << 8 | data[5],
+                   data[6], data[7], data[8], data[9],
+                   data[10] << 8 | data[11]);
+            break;
+        }
+        case 0x1057: {
+            __u8 val;
+            if (sublen < 1) {
+                printf("                        AP setup locked: (invalid length %d)\n",
+                       sublen);
+                break;
+            }
+            val = data[4];
+            printf("                        AP setup locked: 0x%.2x\n", val);
+            break;
+        }
+        case 0x1008:
+        case 0x1053: {
+            __u16 meth;
+            bool comma;
+
+            if (sublen < 2) {
+                printf("                        Config methods: (invalid length %d)\n",
+                       sublen);
+                break;
+            }
+            meth = (data[4] << 8) + data[5];
+            comma = false;
+            printf("                        %sConfig methods:",
+                   subtype == 0x1053 ? "Selected Registrar ": "");
+#define T(bit, name) do {       \
+    if (meth & (1<<bit)) {      \
+        if (comma)      \
+            printf(",");    \
+        comma = true;       \
+        printf(" " name);   \
+    } } while (0)
+            T(0, "USB");
+            T(1, "Ethernet");
+            T(2, "Label");
+            T(3, "Display");
+            T(4, "Ext. NFC");
+            T(5, "Int. NFC");
+            T(6, "NFC Intf.");
+            T(7, "PBC");
+            T(8, "Keypad");
+            printf("\n");
+            break;
+#undef T
+        }
+        default: {
+            const __u8 *subdata = data + 4;
+            __u16 tmplen = sublen;
+
+            printf("                        Unknown TLV (%#.4x, %d bytes):",
+                   subtype, tmplen);
+            while (tmplen) {
+                printf(" %.2x", *subdata);
+                subdata++;
+                tmplen--;
+            }
+            printf("\n");
+            break;
+        }
+        }
+
+        data += sublen + 4;
+        len -= sublen + 4;
+    }
+
+    if (len != 0) {
+        printf("                            bogus tail data (%d):", len);
+        while (len) {
+            printf(" %.2x", *data);
+            data++;
+            len--;
+        }
+        printf("\n");
+    }
+  
+}
+
+/*------------------------------------------------------------------*/
+/*
  * Parse, and display the results of an unknown IE.
  *
  */
@@ -224,18 +466,27 @@ iw_print_ie_unknown(unsigned char *	iebuf,
 
   if(ielen > buflen)
     ielen = buflen;
-
-  printf("Unknown: ");
-  for(i = 0; i < ielen; i++)
-    printf("%02X", iebuf[i]);
-  printf("\n");
+  switch(iebuf[5]) {
+    case 0x04:
+      printf("WPS:\n");
+      iw_print_wps(iebuf + 6, buflen);
+      break;
+    default:
+      printf("Unknown: ");
+      for(i = 0; i < ielen; i++)
+        printf("%02X", iebuf[i]);
+      printf("\n");
+      break;
+  }
 }
+
 
 /*------------------------------------------------------------------*/
 /*
  * Parse, and display the results of a WPA or WPA2 IE.
  *
  */
+
 static inline void 
 iw_print_ie_wpa(unsigned char *	iebuf,
 		int		buflen)
